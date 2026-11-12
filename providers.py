@@ -3,6 +3,8 @@ import json
 import os
 import urllib.error
 import urllib.request
+import time
+import threading
 
 CONFIG = {
     'openai': ('OPENAI_API_KEY', 'https://api.openai.com/v1/chat/completions'),
@@ -11,17 +13,47 @@ CONFIG = {
     'anthropic': ('ANTHROPIC_API_KEY', 'https://api.anthropic.com/v1/messages'),
 }
 
+try:
+    MIN_REQUEST_INTERVAL = float(
+        os.getenv('MIN_REQUEST_INTERVAL', '5')
+    )
+except ValueError as exc:
+    raise ValueError(
+        'MIN_REQUEST_INTERVAL phải là số giây hợp lệ.'
+    ) from exc
+
+if MIN_REQUEST_INTERVAL < 0:
+    raise ValueError('MIN_REQUEST_INTERVAL không được âm.')
+
+_RATE_LOCK = threading.Lock()
+_LAST_REQUEST_TIME = 0.0
+
+
+def wait_for_rate_limit():
+    global _LAST_REQUEST_TIME
+
+    with _RATE_LOCK:
+        elapsed = time.monotonic() - _LAST_REQUEST_TIME
+        delay = MIN_REQUEST_INTERVAL - elapsed
+
+        if delay > 0:
+            time.sleep(delay)
+
+        _LAST_REQUEST_TIME = time.monotonic()
 
 def post_json(url, headers, payload):
-    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json', **headers})
+  req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json', **headers})
+  for attempt in range(3):
     try:
-        with urllib.request.urlopen(req, timeout=60) as response:
+        wait_for_rate_limit()
+        with urllib.request.urlopen(req, timeout=100) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         # Do not print response bodies: they may contain account or request data.
         raise RuntimeError(f'Provider trả HTTP {exc.code}; kiểm tra model, key và quota.') from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f'Không kết nối được provider: {exc.reason}') from exc
+    time.sleep(5 * (2 ** attempt))
 
 
 class Provider:
